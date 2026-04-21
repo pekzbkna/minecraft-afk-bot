@@ -1,0 +1,4 @@
+node_modules
+.auth-cache
+.env
+test
