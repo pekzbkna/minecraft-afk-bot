@@ -1,0 +1,16 @@
+{
+  "name": "minecraft-bot",
+  "version": "1.0.0",
+  "description": "Mineflayer Minecraft bot for play.donutsmp.net",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.18.2",
+    "minecraft-protocol": "^1.66.0",
+    "mineflayer": "^4.37.0",
+    "prismarine-auth": "^3.1.1"
+  }
+}
