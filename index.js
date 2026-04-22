@@ -15,8 +15,9 @@ const PORT = process.env.PORT || 3000;
 const MC_USERNAME = process.env.MC_USERNAME;
 
 if (!MC_USERNAME) {
-  console.error('[Config] ERROR: MC_USERNAME environment variable is not set.');
-  process.exit(1);
+  console.error('[Config] ERROR: MC_USERNAME environment variable is not set. Add it in Railway Variables. Retrying in 30s...');
+  setTimeout(() => { process.exit(1); }, 30000);
+  return;
 }
 
 // ─── Silence protodef chunk-size noise ────────────────────────────────────────
@@ -263,6 +264,14 @@ function renderDashboard() {
   .auth-hint { color: #a8a29e; font-size: 13px; margin-top: 12px; }
   .cmd-section { margin-top: 20px; }
   .cmd-section h3 { font-size: 14px; color: #94a3b8; margin-bottom: 8px; }
+  .quick-btns { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .quick-btn { padding: 6px 12px; border: 1px solid #334155; border-radius: 6px; background: #1e293b; color: #e2e8f0; font-size: 13px; cursor: pointer; transition: all 0.15s; }
+  .quick-btn:hover { background: #334155; border-color: #3b82f6; }
+  .quick-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .quick-btn.buy { border-color: #22c55e; color: #22c55e; }
+  .quick-btn.buy:hover { background: #22c55e22; }
+  .quick-btn.check { border-color: #3b82f6; color: #3b82f6; }
+  .quick-btn.check:hover { background: #3b82f622; }
   .cmd-box { display: flex; gap: 8px; }
   .cmd-input { flex: 1; padding: 12px 14px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; font-size: 15px; outline: none; font-family: monospace; }
   .cmd-input:focus { border-color: #3b82f6; }
@@ -317,7 +326,17 @@ function renderDashboard() {
   ` : ''}
 
   <div class="cmd-section">
-    <h3>Command</h3>
+    <h3>Quick Commands</h3>
+    <div class="quick-btns">
+      <button class="quick-btn check" onclick="quickCmd('/shards')" ${!isOnline ? 'disabled' : ''}>\u2728 /shards</button>
+      <button class="quick-btn check" onclick="quickCmd('/shardshop')" ${!isOnline ? 'disabled' : ''}>\ud83d\uded2 /shardshop</button>
+      <button class="quick-btn buy" onclick="quickCmd('/buy spawner')" ${!isOnline ? 'disabled' : ''}>\ud83d\udc3e Buy Spawner</button>
+      <button class="quick-btn buy" onclick="quickCmd('/buy key')" ${!isOnline ? 'disabled' : ''}>\ud83d\udd11 Buy Key</button>
+      <button class="quick-btn buy" onclick="quickCmd('/buy crate')" ${!isOnline ? 'disabled' : ''}>\ud83d\udce6 Buy Crate</button>
+      <button class="quick-btn" onclick="quickCmd('/bal')" ${!isOnline ? 'disabled' : ''}>\ud83d\udcb0 /bal</button>
+      <button class="quick-btn" onclick="quickCmd('/hub')" ${!isOnline ? 'disabled' : ''}>\ud83c\udfe0 /hub</button>
+    </div>
+    <h3>Custom Command</h3>
     <div class="cmd-box">
       <input class="cmd-input" id="cmdInput" type="text" placeholder="Type any command... e.g. /shards" ${!isOnline ? 'disabled' : ''} onkeydown="if(event.key==='Enter')sendCmd()" autofocus>
       <button class="cmd-btn" id="cmdBtn" onclick="sendCmd()" ${!isOnline ? 'disabled' : ''}>Send</button>
@@ -338,6 +357,16 @@ function renderDashboard() {
 </div>
 
 <script>
+function quickCmd(cmd){
+  fetch('/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:cmd})}).then(r=>r.json()).then(d=>{
+    if(d.ok){
+      const b=document.getElementById('logBox'),t=new Date().toLocaleTimeString();
+      const row=document.createElement('div');row.className='log-out';
+      row.innerHTML='<span class="log-time">'+t+'</span>▸ '+cmd.replace(/</g,'&lt;');
+      b.appendChild(row);b.scrollTop=b.scrollHeight;
+    }
+  });
+}
 function sendCmd(){
   const i=document.getElementById('cmdInput'),v=i.value.trim();if(!v)return;
   fetch('/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:v})}).then(r=>r.json()).then(d=>{
