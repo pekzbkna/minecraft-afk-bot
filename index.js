@@ -436,8 +436,12 @@ app.get('/log', (_req, res) => {
   res.json(cmdLog.slice(-50));
 });
 
+app.get('/health', (_req, res) => {
+  res.json({ ok: true, uptime: process.uptime() });
+});
+
 // ─── Start ────────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`[Web] Control server on port ${PORT}`);
   createBot();
 });
