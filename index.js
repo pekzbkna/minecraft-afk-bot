@@ -97,20 +97,36 @@ function doFindplayerCheck() {
   }, 30000);
 }
 
+// Normalize Small Caps Unicode → ASCII so server messages like "ᴏᴠᴇʀᴡᴏʀʟᴅ" match "overworld"
+function normalizeSmallCaps(str) {
+  return str.replace(/[\u1d00-\u1d7f\ua730-\ua7af\u0280-\u029f]/g, (ch) => {
+    const map = {
+      '\u1d00':'a','\u1d03':'b','\u1d04':'c','\u1d05':'d','\u1d07':'e',
+      '\ua730':'f','\u1d12':'g','\u1d1a':'h','\u026a':'i','\u1d0a':'j',
+      '\u1d0b':'k','\u029f':'l','\u1d0d':'m','\u1d0e':'n','\u1d0f':'o',
+      '\u1d18':'p','\u024b':'q','\u0280':'r','\ua731':'s','\u1d1b':'t',
+      '\u1d1c':'u','\u1d20':'v','\u1d21':'w','\u1d22':'x','\u028f':'y',
+      '\u1d23':'z',
+    };
+    return map[ch] || ch;
+  });
+}
+
 function handleFindplayerResponse(text) {
   if (!afkFocusEnabled || !bot || !bot.entity) return;
   const ign = getIGN();
   const lower = text.toLowerCase();
+  const normalized = normalizeSmallCaps(lower);
 
   // Must contain the IGN to be a /findplayer response
   // Also try without trailing underscore (some servers strip it)
   const ignLower = ign.toLowerCase();
   const ignStripped = ignLower.replace(/_+$/, '');
-  if (!lower.includes(ignLower) && !lower.includes(ignStripped)) return;
+  if (!normalized.includes(ignLower) && !normalized.includes(ignStripped)) return;
 
-  // Must contain a location keyword
-  const isAfkZone = lower.includes('afk') || lower.includes('\u1d00\ua730\u1d00\ua7e1');
-  const isSpawnOrOverworld = lower.includes('spawn') || lower.includes('overworld');
+  // Must contain a location keyword (check normalized text so Unicode Small Caps match)
+  const isAfkZone = normalized.includes('afk');
+  const isSpawnOrOverworld = normalized.includes('spawn') || normalized.includes('overworld');
   if (!isAfkZone && !isSpawnOrOverworld) return;
 
   // Only process if we were actually waiting for a response (prevents false triggers)
@@ -123,8 +139,9 @@ function handleFindplayerResponse(text) {
   if (findplayerTimeout) { clearTimeout(findplayerTimeout); findplayerTimeout = null; }
 
   if (isAfkZone) {
-    const match = text.match(/(?:afk|\u1d00\ua730\u1d00\ua7e1)\s*\d*/i);
-    afkSpotZone = match ? match[0] : 'AFK';
+    // Extract the AFK zone name with number (e.g. "ᴀꜰᴋ 12" or "afk 12")
+    const match = text.match(/(?:afk|[ᴀꜰᴋ]+)\s*\d*/i) || text.match(/afk\s*\d*/i);
+    afkSpotZone = match ? match[0].trim() : 'AFK';
     statusMessage = 'Online — AFK Focus ON (' + afkSpotZone + ')';
     console.log(`[AFK Focus] Player is in AFK zone: ${afkSpotZone}. Staying.`);
   } else if (isSpawnOrOverworld) {
