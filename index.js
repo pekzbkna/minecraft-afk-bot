@@ -13,6 +13,7 @@ const PORT = process.env.PORT || 3000;
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const MC_USERNAME = process.env.MC_USERNAME;
+const MC_IGN = process.env.MC_IGN; // In-game name (may differ from email). Falls back to bot.username after login.
 
 if (!MC_USERNAME) {
   console.error('[Config] ERROR: MC_USERNAME environment variable is not set. Add it in Railway Variables. Retrying in 30s...');
@@ -44,6 +45,96 @@ let authUrl = null;
 let reconnectTimer = null;
 let hasCachedSession = false; // true if a saved Microsoft token exists
 const cmdLog = []; // {time, dir, text} dir='in'=from server, 'out'=sent by us
+
+// ─── AFK Focus ────────────────────────────────────────────────────────────────
+// Uses /findplayer <IGN> to check if the bot is still in the AFK zone.
+// If the server moved it to spawn/overworld, executes /afk 16 to return.
+let afkFocusEnabled = false;
+let afkCheckInterval = null;
+let findplayerTimeout = null;
+let waitingForFindplayer = false;
+let afkSpotZone = null;
+
+function getIGN() {
+  return MC_IGN || (bot ? bot.username : MC_USERNAME);
+}
+
+function enableAfkFocus() {
+  if (!bot || !bot.entity) return false;
+  afkFocusEnabled = true;
+  waitingForFindplayer = false;
+  afkSpotZone = null;
+  statusMessage = 'Online — AFK Focus ON';
+  console.log(`[AFK Focus] Enabled for ${getIGN()}`);
+  doFindplayerCheck();
+  afkCheckInterval = setInterval(doFindplayerCheck, 60000);
+  return true;
+}
+
+function disableAfkFocus() {
+  afkFocusEnabled = false;
+  waitingForFindplayer = false;
+  afkSpotZone = null;
+  if (afkCheckInterval) { clearInterval(afkCheckInterval); afkCheckInterval = null; }
+  if (findplayerTimeout) { clearTimeout(findplayerTimeout); findplayerTimeout = null; }
+  if (bot && bot.entity && botEnabled) statusMessage = 'Online — AFK';
+  console.log('[AFK Focus] Disabled.');
+}
+
+function doFindplayerCheck() {
+  if (!afkFocusEnabled || !bot || !bot.entity || waitingForFindplayer) return;
+  const ign = getIGN();
+  waitingForFindplayer = true;
+  bot.chat(`/findplayer ${ign}`);
+  console.log(`[AFK Focus] Sent /findplayer ${ign}`);
+  // Safety: if no response in 30s, reset flag so we can try again next cycle
+  findplayerTimeout = setTimeout(() => {
+    if (waitingForFindplayer) {
+      console.log('[AFK Focus] No /findplayer response within 30s — resetting.');
+      waitingForFindplayer = false;
+    }
+    findplayerTimeout = null;
+  }, 30000);
+}
+
+function handleFindplayerResponse(text) {
+  if (!afkFocusEnabled || !bot || !bot.entity) return;
+  const ign = getIGN();
+  const lower = text.toLowerCase();
+
+  // Must contain the IGN to be a /findplayer response
+  // Also try without trailing underscore (some servers strip it)
+  const ignLower = ign.toLowerCase();
+  const ignStripped = ignLower.replace(/_+$/, '');
+  if (!lower.includes(ignLower) && !lower.includes(ignStripped)) return;
+
+  // Must contain a location keyword
+  const isAfkZone = lower.includes('afk') || lower.includes('\u1d00\ua730\u1d00\ua7e1');
+  const isSpawnOrOverworld = lower.includes('spawn') || lower.includes('overworld');
+  if (!isAfkZone && !isSpawnOrOverworld) return;
+
+  // Only process if we were actually waiting for a response (prevents false triggers)
+  if (!waitingForFindplayer) {
+    console.log(`[AFK Focus] Ignoring findplayer-like message (not waiting): ${text}`);
+    return;
+  }
+
+  waitingForFindplayer = false;
+  if (findplayerTimeout) { clearTimeout(findplayerTimeout); findplayerTimeout = null; }
+
+  if (isAfkZone) {
+    const match = text.match(/(?:afk|\u1d00\ua730\u1d00\ua7e1)\s*\d*/i);
+    afkSpotZone = match ? match[0] : 'AFK';
+    statusMessage = 'Online — AFK Focus ON (' + afkSpotZone + ')';
+    console.log(`[AFK Focus] Player is in AFK zone: ${afkSpotZone}. Staying.`);
+  } else if (isSpawnOrOverworld) {
+    console.log(`[AFK Focus] Player is in spawn/overworld! Sending /afk 16 (msg: ${text})`);
+    bot.chat('/afk 16');
+    statusMessage = 'AFK Focus — Returning via /afk 16...';
+    cmdLog.push({ time: Date.now(), dir: 'out', text: '/afk 16' });
+    if (cmdLog.length > 200) cmdLog.splice(0, cmdLog.length - 200);
+  }
+}
 
 // ─── Reconnect ────────────────────────────────────────────────────────────────
 function scheduleReconnect(delaySec = 12) {
@@ -84,7 +175,8 @@ function createBot() {
     version: false,
     auth: 'microsoft',
     profilesFolder: AUTH_CACHE_DIR,
-    checkTimeoutInterval: 60000,
+    checkTimeoutInterval: 120000,
+    keepAlive: true,
     physicsEnabled: false,
     onMsaCode: (data) => {
       // This is ONLY called when the saved session is missing or expired
@@ -106,12 +198,17 @@ function createBot() {
   });
 
   bot.on('spawn', () => {
-    // Disable physics so the bot stays perfectly still —
-    // no position packets, no gravity, no movement.
-    // DonutSMP bans macro-like movement; this prevents detection.
-    // keep-alive packets are still sent automatically by minecraft-protocol.
     bot.physicsEnabled = false;
-    statusMessage = 'Online — AFK';
+    if (afkFocusEnabled) {
+      statusMessage = 'Online — AFK Focus ON';
+      // Restart the AFK focus check interval after reconnect
+      if (!afkCheckInterval) {
+        doFindplayerCheck();
+        afkCheckInterval = setInterval(doFindplayerCheck, 60000);
+      }
+    } else {
+      statusMessage = 'Online — AFK';
+    }
     console.log('[Bot] Spawned. Physics disabled — standing still.');
   });
 
@@ -139,6 +236,10 @@ function createBot() {
   bot.on('end', (reason) => {
     console.log(`[Bot] Disconnected: ${reason || 'unknown'}`);
     bot = null;
+    // Stop AFK focus interval while disconnected (will restart on spawn if enabled)
+    if (afkCheckInterval) { clearInterval(afkCheckInterval); afkCheckInterval = null; }
+    waitingForFindplayer = false;
+    if (findplayerTimeout) { clearTimeout(findplayerTimeout); findplayerTimeout = null; }
 
     const kick = (lastKickReason || '').toLowerCase();
     lastKickReason = null;
@@ -167,8 +268,23 @@ function createBot() {
       authCode = null;
       bot = null;
       scheduleReconnect(5);
+    } else if (msg.includes('Failed to obtain profile data') || msg.includes('does the account own minecraft')) {
+      statusMessage = 'No Minecraft license — clearing cache and retrying...';
+      console.log('[Bot] Profile data error — deleting cached token and retrying.');
+      // Delete the corrupted/invalid cached token so next attempt does fresh auth
+      try {
+        const profileFile = path.join(AUTH_CACHE_DIR, `${MC_USERNAME}.json`);
+        if (fs.existsSync(profileFile)) fs.unlinkSync(profileFile);
+      } catch (_) {}
+      bot = null;
+      scheduleReconnect(10);
     } else if (msg.includes('403') || msg.includes('Forbidden')) {
-      statusMessage = 'Auth forbidden — will retry...';
+      statusMessage = 'Auth forbidden — clearing cache and retrying...';
+      console.log('[Bot] 403 Forbidden — deleting cached token.');
+      try {
+        const profileFile = path.join(AUTH_CACHE_DIR, `${MC_USERNAME}.json`);
+        if (fs.existsSync(profileFile)) fs.unlinkSync(profileFile);
+      } catch (_) {}
       bot = null;
       scheduleReconnect(15);
     } else if (code === 'ETIMEDOUT' || code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'AggregateError' || msg.includes('AggregateError') || msg.includes('fetch failed')) {
@@ -182,9 +298,12 @@ function createBot() {
 
   // Log every visible server message so we can diagnose kicks
   bot.on('chat', (username, message) => {
-    console.log(`[Chat] <${username}> ${message}`);
-    cmdLog.push({ time: Date.now(), dir: 'in', text: `<${username}> ${message}` });
+    const fullText = `<${username}> ${message}`;
+    console.log(`[Chat] ${fullText}`);
+    cmdLog.push({ time: Date.now(), dir: 'in', text: fullText });
     if (cmdLog.length > 200) cmdLog.splice(0, cmdLog.length - 200);
+    // Also check for /findplayer responses in chat messages
+    handleFindplayerResponse(message);
   });
 
   bot.on('message', (jsonMsg) => {
@@ -193,6 +312,8 @@ function createBot() {
       console.log(`[Server] ${text}`);
       cmdLog.push({ time: Date.now(), dir: 'in', text });
       if (cmdLog.length > 200) cmdLog.splice(0, cmdLog.length - 200);
+      // Check if this is a /findplayer response for AFK Focus
+      handleFindplayerResponse(text);
     }
   });
 }
@@ -206,6 +327,22 @@ process.on('unhandledRejection', (err) => {
     authCode = null;
     bot = null;
     scheduleReconnect(5);
+  } else if (msg.includes('Failed to obtain profile data') || msg.includes('does the account own minecraft')) {
+    statusMessage = 'No Minecraft license — clearing cache and retrying...';
+    try {
+      const profileFile = path.join(AUTH_CACHE_DIR, `${MC_USERNAME}.json`);
+      if (fs.existsSync(profileFile)) fs.unlinkSync(profileFile);
+    } catch (_) {}
+    bot = null;
+    scheduleReconnect(10);
+  } else if (msg.includes('403') || msg.includes('Forbidden')) {
+    statusMessage = 'Auth forbidden — clearing cache and retrying...';
+    try {
+      const profileFile = path.join(AUTH_CACHE_DIR, `${MC_USERNAME}.json`);
+      if (fs.existsSync(profileFile)) fs.unlinkSync(profileFile);
+    } catch (_) {}
+    bot = null;
+    scheduleReconnect(15);
   }
 });
 
@@ -215,8 +352,9 @@ function stopBot() {
   isReconnecting = false;
   authCode = null;
   authUrl = null;
-  statusMessage = 'Stopped';
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  disableAfkFocus();
+  statusMessage = 'Stopped';
   if (bot) { try { bot.quit('Stopped by user'); } catch (_) {} bot = null; }
   console.log('[Bot] Stopped by user.');
 }
@@ -290,6 +428,17 @@ function renderDashboard() {
   .btn-stop { background: #dc2626; color: #fff; }
   .btn-start { background: #16a34a; color: #fff; }
   .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .afk-focus-box { background: #0f172a; border-radius: 12px; padding: 16px; margin-top: 12px; display: flex; align-items: center; justify-content: space-between; }
+  .afk-focus-label { font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  .afk-focus-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .afk-focus-dot.on { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
+  .afk-focus-dot.off { background: #6b7280; }
+  .afk-focus-btn { padding: 8px 16px; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .afk-focus-btn.enable { background: #22c55e; color: #fff; }
+  .afk-focus-btn.enable:hover { background: #16a34a; }
+  .afk-focus-btn.disable { background: #dc2626; color: #fff; }
+  .afk-focus-btn.disable:hover { background: #b91c1c; }
+  .afk-focus-btn:disabled { opacity: 0.4; cursor: not-allowed; }
   .info { color: #64748b; font-size: 12px; margin-top: 16px; text-align: center; }
   .refresh { color: #3b82f6; cursor: pointer; text-decoration: underline; font-size: 13px; }
 </style>
@@ -347,6 +496,12 @@ function renderDashboard() {
       const prefix = e.dir === 'out' ? '\u25b8' : '\u25c2';
       return `<div class="${cls}"><span class="log-time">${t}</span>${prefix} ${e.text.replace(/</g,'&lt;')}</div>`;
     }).join('')}</div>
+  </div>
+  <div class="afk-focus-box">
+    <span class="afk-focus-label"><span class="afk-focus-dot ${afkFocusEnabled ? 'on' : 'off'}"></span>AFK Focus ${afkFocusEnabled ? 'ON' : 'OFF'}</span>
+    ${afkFocusEnabled
+      ? '<button class="afk-focus-btn disable" onclick="fetch(\'/afk-focus\',{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify({enabled:false})}).then(()=>location.reload())">Disable</button>'
+      : `<button class="afk-focus-btn enable" onclick="fetch('/afk-focus',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:true})}).then(()=>location.reload())" ${!isOnline ? 'disabled' : ''}>Enable</button>`}
   </div>
   <div class="controls">
     <button class="btn btn-stop" onclick="fetch('/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'stop'})}).then(()=>location.reload())" ${!botEnabled ? 'disabled' : ''}>Stop</button>
@@ -410,6 +565,7 @@ app.get('/status', (_req, res) => {
     authCode,
     authUrl,
     hasCachedSession,
+    afkFocusEnabled,
     uptime: process.uptime(),
   });
 });
@@ -421,13 +577,24 @@ app.post('/control', (req, res) => {
   res.json({ ok: true, status: statusMessage });
 });
 
+app.post('/afk-focus', (req, res) => {
+  const { enabled } = req.body;
+  if (enabled) {
+    const ok = enableAfkFocus();
+    res.json({ ok, afkFocusEnabled: true, status: statusMessage });
+  } else {
+    disableAfkFocus();
+    res.json({ ok: true, afkFocusEnabled: false, status: statusMessage });
+  }
+});
+
 app.post('/command', (req, res) => {
   const { cmd } = req.body;
   if (!cmd || typeof cmd !== 'string') return res.json({ ok: false, error: 'No command' });
   if (!bot || !bot.entity) return res.json({ ok: false, error: 'Bot not online' });
   bot.chat(cmd);
   cmdLog.push({ time: Date.now(), dir: 'out', text: cmd });
-  if (cmdLog.length > 100) cmdLog.splice(0, cmdLog.length - 100);
+  if (cmdLog.length > 200) cmdLog.splice(0, cmdLog.length - 200);
   console.log(`[Cmd] Sent: ${cmd}`);
   res.json({ ok: true, sent: cmd });
 });
