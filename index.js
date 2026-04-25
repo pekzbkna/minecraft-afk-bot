@@ -54,6 +54,7 @@ let afkCheckInterval = null;
 let findplayerTimeout = null;
 let waitingForFindplayer = false;
 let afkSpotZone = null;
+let afkReturnTimer = null;
 
 function getIGN() {
   return MC_IGN || (bot ? bot.username : MC_USERNAME);
@@ -77,6 +78,7 @@ function disableAfkFocus() {
   afkSpotZone = null;
   if (afkCheckInterval) { clearInterval(afkCheckInterval); afkCheckInterval = null; }
   if (findplayerTimeout) { clearTimeout(findplayerTimeout); findplayerTimeout = null; }
+  if (afkReturnTimer) { clearTimeout(afkReturnTimer); afkReturnTimer = null; }
   if (bot && bot.entity && botEnabled) statusMessage = 'Online — AFK';
   console.log('[AFK Focus] Disabled.');
 }
@@ -145,15 +147,24 @@ function handleFindplayerResponse(text) {
     statusMessage = 'Online — AFK Focus ON (' + afkSpotZone + ')';
     console.log(`[AFK Focus] Player is in AFK zone: ${afkSpotZone}. Staying.`);
   } else if (isSpawnOrOverworld) {
-    console.log(`[AFK Focus] Player is in spawn/overworld! Sending /afk 16 in 5s (msg: ${text})`);
-    statusMessage = 'AFK Focus — Returning via /afk 16 in 5s...';
-    setTimeout(() => {
-      if (!afkFocusEnabled || !bot || !bot.entity) return;
+    if (afkReturnTimer) {
+      console.log(`[AFK Focus] /afk 16 already scheduled — skipping duplicate (msg: ${text})`);
+      return;
+    }
+    console.log(`[AFK Focus] Player is in spawn/overworld! Sending /afk 16 in 3s (msg: ${text})`);
+    statusMessage = 'AFK Focus — Returning via /afk 16 in 3s...';
+    afkReturnTimer = setTimeout(() => {
+      afkReturnTimer = null;
+      if (!afkFocusEnabled || !bot || !bot.entity) {
+        console.log('[AFK Focus] /afk 16 skipped — bot no longer available');
+        return;
+      }
+      console.log('[AFK Focus] >>> Sending /afk 16 NOW');
       bot.chat('/afk 16');
-      statusMessage = 'AFK Focus — Returning via /afk 16...';
+      statusMessage = 'AFK Focus — Returned via /afk 16';
       cmdLog.push({ time: Date.now(), dir: 'out', text: '/afk 16' });
       if (cmdLog.length > 200) cmdLog.splice(0, cmdLog.length - 200);
-    }, 5000);
+    }, 3000);
   }
 }
 
@@ -261,6 +272,7 @@ function createBot() {
     if (afkCheckInterval) { clearInterval(afkCheckInterval); afkCheckInterval = null; }
     waitingForFindplayer = false;
     if (findplayerTimeout) { clearTimeout(findplayerTimeout); findplayerTimeout = null; }
+    if (afkReturnTimer) { clearTimeout(afkReturnTimer); afkReturnTimer = null; }
 
     const kick = (lastKickReason || '').toLowerCase();
     lastKickReason = null;
