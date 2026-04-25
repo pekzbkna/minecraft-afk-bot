@@ -47,15 +47,18 @@ let hasCachedSession = false; // true if a saved Microsoft token exists
 const cmdLog = []; // {time, dir, text} dir='in'=from server, 'out'=sent by us
 
 // ─── AFK Focus ────────────────────────────────────────────────────────────────
-// Periodically sends /findplayer <IGN>. If the server says the bot is in
-// spawn/overworld (displaced), sends /afk 16 to return to the AFK zone.
-// Handles Unicode Small Caps (ᴏᴠᴇʀᴡᴏʀʟᴅ), reconnection, and duplicate messages.
+// Smart check system: after confirming bot is in AFK zone, gradually increases
+// the check interval (1m → 5m → 10m → 20m → 30m) to save resources.
+// If displaced, sends /afk 16 immediately and resets interval to 1m.
+// Detects teleport confirmation ("You teleported to the ᴀꜰᴋ 16").
 let afkFocusEnabled = false;
-let afkCheckInterval = null;
+let afkCheckTimer = null;        // setTimeout-based (not setInterval) for dynamic intervals
 let findplayerTimeout = null;
 let waitingForFindplayer = false;
-let needsAfkReturn = false;   // persists across reconnects — bot knows it's displaced
-let lastAfk16Time = 0;        // cooldown to prevent spamming /afk 16
+let needsAfkReturn = false;      // persists across reconnects — bot knows it's displaced
+let lastAfk16Time = 0;           // cooldown to prevent spamming /afk 16
+let afkCheckLevel = 0;           // backoff level: 0=1m, 1=5m, 2=10m, 3=20m, 4=30m
+const AFK_CHECK_DELAYS = [60000, 300000, 600000, 1200000, 1800000]; // 1m, 5m, 10m, 20m, 30m
 
 function getIGN() {
   return MC_IGN || (bot ? bot.username : MC_USERNAME);
@@ -111,17 +114,31 @@ function sendAfk16(source) {
   return true;
 }
 
+function scheduleNextCheck() {
+  if (afkCheckTimer) { clearTimeout(afkCheckTimer); afkCheckTimer = null; }
+  if (!afkFocusEnabled) return;
+  const delay = AFK_CHECK_DELAYS[afkCheckLevel] || AFK_CHECK_DELAYS[AFK_CHECK_DELAYS.length - 1];
+  console.log(`[AFK Focus] Next check in ${Math.round(delay / 1000)}s (level ${afkCheckLevel})`);
+  afkCheckTimer = setTimeout(() => {
+    afkCheckTimer = null;
+    if (afkFocusEnabled && bot && bot.entity) doFindplayerCheck();
+  }, delay);
+}
+
 function enableAfkFocus() {
   if (!bot || !bot.entity) return false;
   afkFocusEnabled = true;
   waitingForFindplayer = false;
   needsAfkReturn = false;
   lastAfk16Time = 0;
+  afkCheckLevel = 0;
   statusMessage = 'Online — AFK Focus ON';
   console.log(`[AFK Focus] Enabled for ${getIGN()}`);
-  // First check after 3s (give server time to settle), then every 60s
-  setTimeout(() => { if (afkFocusEnabled && bot && bot.entity) doFindplayerCheck(); }, 3000);
-  afkCheckInterval = setInterval(doFindplayerCheck, 60000);
+  // First check after 3s (give server time to settle)
+  afkCheckTimer = setTimeout(() => {
+    afkCheckTimer = null;
+    if (afkFocusEnabled && bot && bot.entity) doFindplayerCheck();
+  }, 3000);
   return true;
 }
 
@@ -130,7 +147,8 @@ function disableAfkFocus() {
   waitingForFindplayer = false;
   needsAfkReturn = false;
   lastAfk16Time = 0;
-  if (afkCheckInterval) { clearInterval(afkCheckInterval); afkCheckInterval = null; }
+  afkCheckLevel = 0;
+  if (afkCheckTimer) { clearTimeout(afkCheckTimer); afkCheckTimer = null; }
   if (findplayerTimeout) { clearTimeout(findplayerTimeout); findplayerTimeout = null; }
   if (bot && bot.entity && botEnabled) statusMessage = 'Online — AFK';
   console.log('[AFK Focus] Disabled.');
@@ -154,6 +172,19 @@ function doFindplayerCheck() {
 function handleServerMessage(text) {
   if (!afkFocusEnabled) return;
   const ascii = toAscii(text.toLowerCase());
+
+  // ── Detect teleport confirmation: "You teleported to the ᴀꜰᴋ 16" ──
+  if (ascii.includes('teleported') && ascii.includes('afk')) {
+    needsAfkReturn = false;
+    if (afkCheckLevel < AFK_CHECK_DELAYS.length - 1) afkCheckLevel++;
+    const match = text.match(/(?:afk|[ᴀꜰᴋ]+)\s*\d*/i) || text.match(/afk\s*\d*/i);
+    const zone = match ? match[0].trim() : 'AFK';
+    statusMessage = `Online — AFK Focus ON (${zone})`;
+    console.log(`[AFK Focus] Teleport confirmed! In ${zone}. Backoff level → ${afkCheckLevel} (${Math.round(AFK_CHECK_DELAYS[afkCheckLevel] / 1000)}s).`);
+    scheduleNextCheck();
+    return;
+  }
+
   const ign = getIGN().toLowerCase();
   const ignStrip = ign.replace(/_+$/, '');
 
@@ -176,13 +207,20 @@ function handleServerMessage(text) {
 
   if (isAfk) {
     needsAfkReturn = false;
+    // Increase backoff level — confirmed in AFK, check less often next time
+    if (afkCheckLevel < AFK_CHECK_DELAYS.length - 1) afkCheckLevel++;
     const match = text.match(/(?:afk|[ᴀꜰᴋ]+)\s*\d*/i) || text.match(/afk\s*\d*/i);
     const zone = match ? match[0].trim() : 'AFK';
     statusMessage = `Online — AFK Focus ON (${zone})`;
-    console.log(`[AFK Focus] In AFK zone: ${zone}. Staying.`);
+    console.log(`[AFK Focus] In AFK zone: ${zone}. Backoff level → ${afkCheckLevel} (${Math.round(AFK_CHECK_DELAYS[afkCheckLevel] / 1000)}s).`);
+    scheduleNextCheck();
   } else if (isDisplaced) {
     console.log(`[AFK Focus] Displaced! (msg: ${text})`);
+    // Reset backoff — need to check frequently after returning
+    afkCheckLevel = 0;
     sendAfk16('findplayer');
+    // Schedule next check soon (1m) to confirm teleport worked
+    scheduleNextCheck();
   }
 }
 
@@ -255,10 +293,12 @@ function createBot() {
         console.log('[AFK Focus] Spawned while displaced — sending /afk 16');
         sendAfk16('spawn-reconnect');
       }
-      // Always restart the check cycle after spawn
-      if (!afkCheckInterval) {
-        setTimeout(() => { if (afkFocusEnabled && bot && bot.entity) doFindplayerCheck(); }, 5000);
-        afkCheckInterval = setInterval(doFindplayerCheck, 60000);
+      // Restart the smart check cycle after spawn
+      if (!afkCheckTimer) {
+        afkCheckTimer = setTimeout(() => {
+          afkCheckTimer = null;
+          if (afkFocusEnabled && bot && bot.entity) doFindplayerCheck();
+        }, 5000);
       }
       if (!needsAfkReturn) statusMessage = 'Online — AFK Focus ON';
     } else {
@@ -291,8 +331,8 @@ function createBot() {
   bot.on('end', (reason) => {
     console.log(`[Bot] Disconnected: ${reason || 'unknown'}`);
     bot = null;
-    // Stop AFK focus interval while disconnected (will restart on spawn if enabled)
-    if (afkCheckInterval) { clearInterval(afkCheckInterval); afkCheckInterval = null; }
+    // Stop AFK focus timers while disconnected (will restart on spawn if enabled)
+    if (afkCheckTimer) { clearTimeout(afkCheckTimer); afkCheckTimer = null; }
     waitingForFindplayer = false;
     if (findplayerTimeout) { clearTimeout(findplayerTimeout); findplayerTimeout = null; }
     // Keep needsAfkReturn — if bot was displaced, it must /afk 16 after reconnect
