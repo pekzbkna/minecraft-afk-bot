@@ -145,11 +145,15 @@ function handleFindplayerResponse(text) {
     statusMessage = 'Online — AFK Focus ON (' + afkSpotZone + ')';
     console.log(`[AFK Focus] Player is in AFK zone: ${afkSpotZone}. Staying.`);
   } else if (isSpawnOrOverworld) {
-    console.log(`[AFK Focus] Player is in spawn/overworld! Sending /afk 16 (msg: ${text})`);
-    bot.chat('/afk 16');
-    statusMessage = 'AFK Focus — Returning via /afk 16...';
-    cmdLog.push({ time: Date.now(), dir: 'out', text: '/afk 16' });
-    if (cmdLog.length > 200) cmdLog.splice(0, cmdLog.length - 200);
+    console.log(`[AFK Focus] Player is in spawn/overworld! Sending /afk 16 in 5s (msg: ${text})`);
+    statusMessage = 'AFK Focus — Returning via /afk 16 in 5s...';
+    setTimeout(() => {
+      if (!afkFocusEnabled || !bot || !bot.entity) return;
+      bot.chat('/afk 16');
+      statusMessage = 'AFK Focus — Returning via /afk 16...';
+      cmdLog.push({ time: Date.now(), dir: 'out', text: '/afk 16' });
+      if (cmdLog.length > 200) cmdLog.splice(0, cmdLog.length - 200);
+    }, 5000);
   }
 }
 
