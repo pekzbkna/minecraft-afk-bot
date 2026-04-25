@@ -54,7 +54,7 @@ let afkCheckInterval = null;
 let findplayerTimeout = null;
 let waitingForFindplayer = false;
 let afkSpotZone = null;
-let afkReturnTimer = null;
+let needsAfkReturn = false; // true if we know bot is displaced and must /afk 16 on next spawn
 
 function getIGN() {
   return MC_IGN || (bot ? bot.username : MC_USERNAME);
@@ -76,9 +76,9 @@ function disableAfkFocus() {
   afkFocusEnabled = false;
   waitingForFindplayer = false;
   afkSpotZone = null;
+  needsAfkReturn = false;
   if (afkCheckInterval) { clearInterval(afkCheckInterval); afkCheckInterval = null; }
   if (findplayerTimeout) { clearTimeout(findplayerTimeout); findplayerTimeout = null; }
-  if (afkReturnTimer) { clearTimeout(afkReturnTimer); afkReturnTimer = null; }
   if (bot && bot.entity && botEnabled) statusMessage = 'Online — AFK';
   console.log('[AFK Focus] Disabled.');
 }
@@ -147,24 +147,12 @@ function handleFindplayerResponse(text) {
     statusMessage = 'Online — AFK Focus ON (' + afkSpotZone + ')';
     console.log(`[AFK Focus] Player is in AFK zone: ${afkSpotZone}. Staying.`);
   } else if (isSpawnOrOverworld) {
-    if (afkReturnTimer) {
-      console.log(`[AFK Focus] /afk 16 already scheduled — skipping duplicate (msg: ${text})`);
-      return;
-    }
-    console.log(`[AFK Focus] Player is in spawn/overworld! Sending /afk 16 in 3s (msg: ${text})`);
-    statusMessage = 'AFK Focus — Returning via /afk 16 in 3s...';
-    afkReturnTimer = setTimeout(() => {
-      afkReturnTimer = null;
-      if (!afkFocusEnabled || !bot || !bot.entity) {
-        console.log('[AFK Focus] /afk 16 skipped — bot no longer available');
-        return;
-      }
-      console.log('[AFK Focus] >>> Sending /afk 16 NOW');
-      bot.chat('/afk 16');
-      statusMessage = 'AFK Focus — Returned via /afk 16';
-      cmdLog.push({ time: Date.now(), dir: 'out', text: '/afk 16' });
-      if (cmdLog.length > 200) cmdLog.splice(0, cmdLog.length - 200);
-    }, 3000);
+    console.log(`[AFK Focus] Player is in spawn/overworld! Sending /afk 16 NOW (msg: ${text})`);
+    needsAfkReturn = true; // Mark so we retry on reconnect if this attempt fails
+    bot.chat('/afk 16');
+    statusMessage = 'AFK Focus — Returned via /afk 16';
+    cmdLog.push({ time: Date.now(), dir: 'out', text: '/afk 16' });
+    if (cmdLog.length > 200) cmdLog.splice(0, cmdLog.length - 200);
   }
 }
 
@@ -232,7 +220,17 @@ function createBot() {
   bot.on('spawn', () => {
     bot.physicsEnabled = false;
     if (afkFocusEnabled) {
-      statusMessage = 'Online — AFK Focus ON';
+      if (needsAfkReturn) {
+        // We already know the bot is displaced — send /afk 16 immediately
+        console.log('[AFK Focus] Bot respawned while displaced — sending /afk 16 immediately');
+        bot.chat('/afk 16');
+        statusMessage = 'AFK Focus — Returned via /afk 16';
+        cmdLog.push({ time: Date.now(), dir: 'out', text: '/afk 16' });
+        if (cmdLog.length > 200) cmdLog.splice(0, cmdLog.length - 200);
+        needsAfkReturn = false;
+      } else {
+        statusMessage = 'Online — AFK Focus ON';
+      }
       // Restart the AFK focus check interval after reconnect
       if (!afkCheckInterval) {
         doFindplayerCheck();
@@ -272,7 +270,6 @@ function createBot() {
     if (afkCheckInterval) { clearInterval(afkCheckInterval); afkCheckInterval = null; }
     waitingForFindplayer = false;
     if (findplayerTimeout) { clearTimeout(findplayerTimeout); findplayerTimeout = null; }
-    if (afkReturnTimer) { clearTimeout(afkReturnTimer); afkReturnTimer = null; }
 
     const kick = (lastKickReason || '').toLowerCase();
     lastKickReason = null;
