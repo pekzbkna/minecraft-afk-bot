@@ -62,66 +62,32 @@ function getIGN() {
 }
 
 // Convert ANY Unicode lookalike → ASCII so server messages always match.
-// Handles Small Caps, Cyrillic homoglyphs, IPA, superscript, fullwidth, etc.
 // "ѕᴘᴀᴡɴ" → "spawn", "ᴏᴠᴇʀᴡᴏʀʟᴅ" → "overworld", "ᴀꜰᴋ" → "afk"
 function toAscii(str) {
-  // Step 1: NFKC normalization handles many compatibility characters
-  let out = str.normalize('NFKC');
-  // Step 2: Map remaining non-ASCII lookalikes to ASCII
-  out = out.replace(/[^\x00-\x7f]/g, (ch) => {
-    const cp = ch.codePointAt(0);
-    // ── Small Caps U+1D00-U+1D7F ──
-    if (cp >= 0x1d00 && cp <= 0x1d7f) {
-      const sc = 'abcd\u0000ef\u0000\u0000\u0000ghijklmnopqrstuvwxyz';
-      const i = cp - 0x1d00;
-      if (i < sc.length && sc[i] !== '\0') return sc[i];
-    }
-    // ── Small Caps U+A730-U+A7AF ──
-    const a7 = { 0xa730:'f', 0xa731:'s', 0xa732:'f', 0xa733:'s', 0xa734:'f', 0xa735:'s' };
-    if (cp >= 0xa730 && cp <= 0xa7af && a7[cp]) return a7[cp];
-    // ── IPA Extensions U+0250-U+02AF ──
-    const ipa = {
-      0x0250:'a',0x0251:'a',0x0252:'a',0x0253:'b',0x0254:'o',0x0255:'c',
-      0x0256:'d',0x0257:'d',0x0259:'e',0x025a:'e',0x025b:'e',0x025c:'e',
-      0x025f:'j',0x0260:'g',0x0261:'g',0x0262:'g',0x0263:'g',0x0264:'r',
-      0x0265:'h',0x0266:'h',0x0267:'h',0x0268:'i',0x0269:'i',0x026a:'i',
-      0x026b:'l',0x026c:'l',0x026d:'l',0x026e:'l',0x026f:'m',
-      0x0270:'m',0x0271:'m',0x0272:'n',0x0273:'n',0x0274:'n',0x0275:'o',
-      0x0276:'o',0x0277:'o',0x0278:'o',0x0279:'r',0x027a:'r',0x027b:'r',
-      0x027c:'r',0x027d:'r',0x027e:'r',0x027f:'r',
-      0x0280:'r',0x0281:'r',0x0282:'s',0x0283:'s',0x0284:'j',
-      0x0287:'t',0x0288:'t',0x0289:'u',0x028a:'u',0x028b:'v',
-      0x028c:'v',0x028d:'w',0x028e:'y',0x028f:'y',
-      0x0290:'z',0x0291:'z',0x0292:'z',0x0294:'?',0x0295:'o',
-      0x0298:'o',0x0299:'b',0x029a:'e',0x029b:'g',0x029c:'h',
-      0x029d:'j',0x029e:'k',0x029f:'l',0x02a0:'q',
-    };
-    if (cp >= 0x0250 && cp <= 0x02a0 && ipa[cp]) return ipa[cp];
-    // ── Cyrillic homoglyphs U+0400-U+052F ──
-    const cyr = {
-      0x0430:'a',0x0432:'b',0x0435:'e',0x043a:'k',0x043c:'m',
-      0x043d:'h',0x043e:'o',0x043f:'n',0x0440:'p',0x0441:'c',
-      0x0442:'t',0x0443:'y',0x0445:'x',0x0454:'e',0x0455:'s',
-      0x0456:'i',0x0458:'j',0x0475:'v',0x0493:'g',0x0497:'z',
-      0x04ab:'c',0x04bb:'h',0x051b:'q',0x0501:'d',
-    };
-    if (cyr[cp]) return cyr[cp];
-    // ── Fullwidth Latin U+FF00-U+FFEF ──
-    if (cp >= 0xff41 && cp <= 0xff5a) return String.fromCodePoint(cp - 0xff21 + 0x41).toLowerCase();
-    if (cp >= 0xff21 && cp <= 0xff3a) return String.fromCodePoint(cp - 0xff21 + 0x41).toLowerCase();
-    // ── Superscript modifiers U+1D43-U+1DBF ──
-    const sup = {
-      0x1d43:'a',0x1d47:'b',0x1d9c:'c',0x1d30:'d',0x1d49:'e',
-      0x1da0:'f',0x1da4:'g',0x1da6:'h',0x1da8:'i',0x1db2:'j',
-      0x1db4:'k',0x1db6:'l',0x1db8:'m',0x1dba:'n',0x1dbe:'o',
-      0x1dc0:'p',0x1dc2:'r',0x1dc4:'s',0x1dc6:'t',0x1dc8:'u',
-      0x1dca:'v',0x1dcc:'w',0x1dce:'x',0x1dd0:'y',0x1dd2:'z',
-    };
-    if (sup[cp]) return sup[cp];
-    // Unknown — keep as-is
-    return ch;
-  });
-  return out;
+  return str.replace(/[^\x00-\x7f]/g, (ch) => ({
+    // ── Small Caps U+1D00-U+1D7F (explicit — range has gaps so no string index) ──
+    '\u1d00':'a','\u1d03':'b','\u1d04':'c','\u1d05':'d','\u1d07':'e',
+    '\ua730':'f','\u1d12':'g','\u1d1a':'h','\u026a':'i','\u1d0a':'j',
+    '\u1d0b':'k','\u029f':'l','\u1d0d':'m','\u1d0e':'n','\u1d0f':'o',
+    '\u1d18':'p','\u024b':'q','\u0280':'r','\ua731':'s','\u1d1b':'t',
+    '\u1d1c':'u','\u1d20':'v','\u1d21':'w','\u1d22':'x','\u028f':'y',
+    '\u1d23':'z',
+    // ── IPA Small Caps (servers mix these with U+1Dxx range) ──
+    '\u0299':'b','\u0262':'g','\u0274':'n',
+    // ── Cyrillic homoglyphs (look identical to Latin) ──
+    '\u0430':'a','\u0432':'b','\u0435':'e','\u043a':'k','\u043c':'m',
+    '\u043d':'h','\u043e':'o','\u043f':'n','\u0440':'p','\u0441':'c',
+    '\u0442':'t','\u0443':'y','\u0445':'x','\u0454':'e','\u0455':'s',
+    '\u0456':'i','\u0458':'j','\u0475':'v','\u0493':'g','\u0497':'z',
+    '\u04ab':'c','\u04bb':'h','\u051b':'q','\u0501':'d',
+    // ── Fullwidth Latin ──
+    '\uff41':'a','\uff42':'b','\uff43':'c','\uff44':'d','\uff45':'e',
+    '\uff46':'f','\uff47':'g','\uff48':'h','\uff49':'i','\uff4a':'j',
+    '\uff4b':'k','\uff4c':'l','\uff4d':'m','\uff4e':'n','\uff4f':'o',
+    '\uff50':'p','\uff51':'q','\uff52':'r','\uff53':'s','\uff54':'t',
+    '\uff55':'u','\uff56':'v','\uff57':'w','\uff58':'x','\uff59':'y',
+    '\uff5a':'z',
+  }[ch] || ch));
 }
 
 function sendAfk16(source) {
