@@ -47,28 +47,114 @@ let hasCachedSession = false; // true if a saved Microsoft token exists
 const cmdLog = []; // {time, dir, text} dir='in'=from server, 'out'=sent by us
 
 // ─── AFK Focus ────────────────────────────────────────────────────────────────
-// Uses /findplayer <IGN> to check if the bot is still in the AFK zone.
-// If the server moved it to spawn/overworld, executes /afk 16 to return.
+// Periodically sends /findplayer <IGN>. If the server says the bot is in
+// spawn/overworld (displaced), sends /afk 16 to return to the AFK zone.
+// Handles Unicode Small Caps (ᴏᴠᴇʀᴡᴏʀʟᴅ), reconnection, and duplicate messages.
 let afkFocusEnabled = false;
 let afkCheckInterval = null;
 let findplayerTimeout = null;
 let waitingForFindplayer = false;
-let afkSpotZone = null;
-let needsAfkReturn = false;
-let lastAfk16Time = 0; // cooldown: don't send /afk 16 more than once per 15s
+let needsAfkReturn = false;   // persists across reconnects — bot knows it's displaced
+let lastAfk16Time = 0;        // cooldown to prevent spamming /afk 16
 
 function getIGN() {
   return MC_IGN || (bot ? bot.username : MC_USERNAME);
+}
+
+// Convert ANY Unicode lookalike → ASCII so server messages always match.
+// Handles Small Caps, Cyrillic homoglyphs, IPA, superscript, fullwidth, etc.
+// "ѕᴘᴀᴡɴ" → "spawn", "ᴏᴠᴇʀᴡᴏʀʟᴅ" → "overworld", "ᴀꜰᴋ" → "afk"
+function toAscii(str) {
+  // Step 1: NFKC normalization handles many compatibility characters
+  let out = str.normalize('NFKC');
+  // Step 2: Map remaining non-ASCII lookalikes to ASCII
+  out = out.replace(/[^\x00-\x7f]/g, (ch) => {
+    const cp = ch.codePointAt(0);
+    // ── Small Caps U+1D00-U+1D7F ──
+    if (cp >= 0x1d00 && cp <= 0x1d7f) {
+      const sc = 'abcd\u0000ef\u0000\u0000\u0000ghijklmnopqrstuvwxyz';
+      const i = cp - 0x1d00;
+      if (i < sc.length && sc[i] !== '\0') return sc[i];
+    }
+    // ── Small Caps U+A730-U+A7AF ──
+    const a7 = { 0xa730:'f', 0xa731:'s', 0xa732:'f', 0xa733:'s', 0xa734:'f', 0xa735:'s' };
+    if (cp >= 0xa730 && cp <= 0xa7af && a7[cp]) return a7[cp];
+    // ── IPA Extensions U+0250-U+02AF ──
+    const ipa = {
+      0x0250:'a',0x0251:'a',0x0252:'a',0x0253:'b',0x0254:'o',0x0255:'c',
+      0x0256:'d',0x0257:'d',0x0259:'e',0x025a:'e',0x025b:'e',0x025c:'e',
+      0x025f:'j',0x0260:'g',0x0261:'g',0x0262:'g',0x0263:'g',0x0264:'r',
+      0x0265:'h',0x0266:'h',0x0267:'h',0x0268:'i',0x0269:'i',0x026a:'i',
+      0x026b:'l',0x026c:'l',0x026d:'l',0x026e:'l',0x026f:'m',
+      0x0270:'m',0x0271:'m',0x0272:'n',0x0273:'n',0x0274:'n',0x0275:'o',
+      0x0276:'o',0x0277:'o',0x0278:'o',0x0279:'r',0x027a:'r',0x027b:'r',
+      0x027c:'r',0x027d:'r',0x027e:'r',0x027f:'r',
+      0x0280:'r',0x0281:'r',0x0282:'s',0x0283:'s',0x0284:'j',
+      0x0287:'t',0x0288:'t',0x0289:'u',0x028a:'u',0x028b:'v',
+      0x028c:'v',0x028d:'w',0x028e:'y',0x028f:'y',
+      0x0290:'z',0x0291:'z',0x0292:'z',0x0294:'?',0x0295:'o',
+      0x0298:'o',0x0299:'b',0x029a:'e',0x029b:'g',0x029c:'h',
+      0x029d:'j',0x029e:'k',0x029f:'l',0x02a0:'q',
+    };
+    if (cp >= 0x0250 && cp <= 0x02a0 && ipa[cp]) return ipa[cp];
+    // ── Cyrillic homoglyphs U+0400-U+052F ──
+    const cyr = {
+      0x0430:'a',0x0432:'b',0x0435:'e',0x043a:'k',0x043c:'m',
+      0x043d:'h',0x043e:'o',0x043f:'n',0x0440:'p',0x0441:'c',
+      0x0442:'t',0x0443:'y',0x0445:'x',0x0454:'e',0x0455:'s',
+      0x0456:'i',0x0458:'j',0x0475:'v',0x0493:'g',0x0497:'z',
+      0x04ab:'c',0x04bb:'h',0x051b:'q',0x0501:'d',
+    };
+    if (cyr[cp]) return cyr[cp];
+    // ── Fullwidth Latin U+FF00-U+FFEF ──
+    if (cp >= 0xff41 && cp <= 0xff5a) return String.fromCodePoint(cp - 0xff21 + 0x41).toLowerCase();
+    if (cp >= 0xff21 && cp <= 0xff3a) return String.fromCodePoint(cp - 0xff21 + 0x41).toLowerCase();
+    // ── Superscript modifiers U+1D43-U+1DBF ──
+    const sup = {
+      0x1d43:'a',0x1d47:'b',0x1d9c:'c',0x1d30:'d',0x1d49:'e',
+      0x1da0:'f',0x1da4:'g',0x1da6:'h',0x1da8:'i',0x1db2:'j',
+      0x1db4:'k',0x1db6:'l',0x1db8:'m',0x1dba:'n',0x1dbe:'o',
+      0x1dc0:'p',0x1dc2:'r',0x1dc4:'s',0x1dc6:'t',0x1dc8:'u',
+      0x1dca:'v',0x1dcc:'w',0x1dce:'x',0x1dd0:'y',0x1dd2:'z',
+    };
+    if (sup[cp]) return sup[cp];
+    // Unknown — keep as-is
+    return ch;
+  });
+  return out;
+}
+
+function sendAfk16(source) {
+  const now = Date.now();
+  if (now - lastAfk16Time < 15000) {
+    console.log(`[AFK Focus] /afk 16 on cooldown (${Math.ceil((15000 - (now - lastAfk16Time)) / 1000)}s left) — ${source}`);
+    return false;
+  }
+  if (!bot || !bot.entity) {
+    console.log(`[AFK Focus] Bot not available — marking needsAfkReturn=true (${source})`);
+    needsAfkReturn = true;
+    return false;
+  }
+  lastAfk16Time = now;
+  needsAfkReturn = true;
+  bot.chat('/afk 16');
+  statusMessage = 'AFK Focus — Sent /afk 16';
+  cmdLog.push({ time: now, dir: 'out', text: '/afk 16' });
+  if (cmdLog.length > 200) cmdLog.splice(0, cmdLog.length - 200);
+  console.log(`[AFK Focus] >>> /afk 16 sent (${source})`);
+  return true;
 }
 
 function enableAfkFocus() {
   if (!bot || !bot.entity) return false;
   afkFocusEnabled = true;
   waitingForFindplayer = false;
-  afkSpotZone = null;
+  needsAfkReturn = false;
+  lastAfk16Time = 0;
   statusMessage = 'Online — AFK Focus ON';
   console.log(`[AFK Focus] Enabled for ${getIGN()}`);
-  doFindplayerCheck();
+  // First check after 3s (give server time to settle), then every 60s
+  setTimeout(() => { if (afkFocusEnabled && bot && bot.entity) doFindplayerCheck(); }, 3000);
   afkCheckInterval = setInterval(doFindplayerCheck, 60000);
   return true;
 }
@@ -76,7 +162,6 @@ function enableAfkFocus() {
 function disableAfkFocus() {
   afkFocusEnabled = false;
   waitingForFindplayer = false;
-  afkSpotZone = null;
   needsAfkReturn = false;
   lastAfk16Time = 0;
   if (afkCheckInterval) { clearInterval(afkCheckInterval); afkCheckInterval = null; }
@@ -85,92 +170,53 @@ function disableAfkFocus() {
   console.log('[AFK Focus] Disabled.');
 }
 
-function sendAfk16(source) {
-  const now = Date.now();
-  if (now - lastAfk16Time < 15000) {
-    console.log(`[AFK Focus] /afk 16 cooldown (${Math.ceil((15000 - (now - lastAfk16Time)) / 1000)}s left) — skipping from ${source}`);
-    return false;
-  }
-  if (!bot || !bot.entity) {
-    console.log(`[AFK Focus] /afk 16 skipped — bot not available (${source})`);
-    return false;
-  }
-  lastAfk16Time = now;
-  needsAfkReturn = true;
-  console.log(`[AFK Focus] >>> Sending /afk 16 (${source})`);
-  bot.chat('/afk 16');
-  statusMessage = 'AFK Focus — Returned via /afk 16';
-  cmdLog.push({ time: now, dir: 'out', text: '/afk 16' });
-  if (cmdLog.length > 200) cmdLog.splice(0, cmdLog.length - 200);
-  return true;
-}
-
 function doFindplayerCheck() {
   if (!afkFocusEnabled || !bot || !bot.entity || waitingForFindplayer) return;
   const ign = getIGN();
   waitingForFindplayer = true;
   bot.chat(`/findplayer ${ign}`);
   console.log(`[AFK Focus] Sent /findplayer ${ign}`);
-  // Safety: if no response in 30s, reset flag so we can try again next cycle
   findplayerTimeout = setTimeout(() => {
     if (waitingForFindplayer) {
-      console.log('[AFK Focus] No /findplayer response within 30s — resetting.');
+      console.log('[AFK Focus] No /findplayer response in 30s — resetting');
       waitingForFindplayer = false;
     }
     findplayerTimeout = null;
   }, 30000);
 }
 
-// Normalize Small Caps Unicode → ASCII so server messages like "ᴏᴠᴇʀᴡᴏʀʟᴅ" match "overworld"
-function normalizeSmallCaps(str) {
-  return str.replace(/[\u1d00-\u1d7f\ua730-\ua7af\u0280-\u029f]/g, (ch) => {
-    const map = {
-      '\u1d00':'a','\u1d03':'b','\u1d04':'c','\u1d05':'d','\u1d07':'e',
-      '\ua730':'f','\u1d12':'g','\u1d1a':'h','\u026a':'i','\u1d0a':'j',
-      '\u1d0b':'k','\u029f':'l','\u1d0d':'m','\u1d0e':'n','\u1d0f':'o',
-      '\u1d18':'p','\u024b':'q','\u0280':'r','\ua731':'s','\u1d1b':'t',
-      '\u1d1c':'u','\u1d20':'v','\u1d21':'w','\u1d22':'x','\u028f':'y',
-      '\u1d23':'z',
-    };
-    return map[ch] || ch;
-  });
-}
-
-function handleFindplayerResponse(text) {
-  if (!afkFocusEnabled || !bot || !bot.entity) return;
-  const ign = getIGN();
-  const lower = text.toLowerCase();
-  const normalized = normalizeSmallCaps(lower);
+function handleServerMessage(text) {
+  if (!afkFocusEnabled) return;
+  const ascii = toAscii(text.toLowerCase());
+  const ign = getIGN().toLowerCase();
+  const ignStrip = ign.replace(/_+$/, '');
 
   // Must contain the IGN to be a /findplayer response
-  // Also try without trailing underscore (some servers strip it)
-  const ignLower = ign.toLowerCase();
-  const ignStripped = ignLower.replace(/_+$/, '');
-  if (!normalized.includes(ignLower) && !normalized.includes(ignStripped)) return;
+  if (!ascii.includes(ign) && !ascii.includes(ignStrip)) return;
 
-  // Must contain a location keyword (check normalized text so Unicode Small Caps match)
-  const isAfkZone = normalized.includes('afk');
-  const isSpawnOrOverworld = normalized.includes('spawn') || normalized.includes('overworld');
-  if (!isAfkZone && !isSpawnOrOverworld) return;
+  // Must contain a location keyword
+  const isAfk = ascii.includes('afk');
+  const isDisplaced = ascii.includes('spawn') || ascii.includes('overworld');
+  if (!isAfk && !isDisplaced) return;
 
-  // Only process if we were actually waiting for a response (prevents false triggers)
+  // Only process if we were waiting (prevents false triggers from random chat)
   if (!waitingForFindplayer) {
-    console.log(`[AFK Focus] Ignoring findplayer-like message (not waiting): ${text}`);
+    console.log(`[AFK Focus] Ignoring non-requested findplayer message: ${text}`);
     return;
   }
 
   waitingForFindplayer = false;
   if (findplayerTimeout) { clearTimeout(findplayerTimeout); findplayerTimeout = null; }
 
-  if (isAfkZone) {
-    // Extract the AFK zone name with number (e.g. "ᴀꜰᴋ 12" or "afk 12")
+  if (isAfk) {
+    needsAfkReturn = false;
     const match = text.match(/(?:afk|[ᴀꜰᴋ]+)\s*\d*/i) || text.match(/afk\s*\d*/i);
-    afkSpotZone = match ? match[0].trim() : 'AFK';
-    statusMessage = 'Online — AFK Focus ON (' + afkSpotZone + ')';
-    needsAfkReturn = false; // Successfully in AFK zone — no need to return
-    console.log(`[AFK Focus] Player is in AFK zone: ${afkSpotZone}. Staying.`);
-  } else if (isSpawnOrOverworld) {
-    sendAfk16('findplayer-response');
+    const zone = match ? match[0].trim() : 'AFK';
+    statusMessage = `Online — AFK Focus ON (${zone})`;
+    console.log(`[AFK Focus] In AFK zone: ${zone}. Staying.`);
+  } else if (isDisplaced) {
+    console.log(`[AFK Focus] Displaced! (msg: ${text})`);
+    sendAfk16('findplayer');
   }
 }
 
@@ -239,19 +285,16 @@ function createBot() {
     bot.physicsEnabled = false;
     if (afkFocusEnabled) {
       if (needsAfkReturn) {
-        // Bot reconnected while displaced — try /afk 16 again
-        sendAfk16('respawn');
-      } else {
-        statusMessage = 'Online — AFK Focus ON';
+        // Bot was displaced before disconnect — send /afk 16 first
+        console.log('[AFK Focus] Spawned while displaced — sending /afk 16');
+        sendAfk16('spawn-reconnect');
       }
-      // Restart the AFK focus check interval after reconnect
+      // Always restart the check cycle after spawn
       if (!afkCheckInterval) {
-        // Wait 5s after spawn before first check (server needs time to settle)
-        setTimeout(() => {
-          if (afkFocusEnabled && bot && bot.entity) doFindplayerCheck();
-        }, 5000);
+        setTimeout(() => { if (afkFocusEnabled && bot && bot.entity) doFindplayerCheck(); }, 5000);
         afkCheckInterval = setInterval(doFindplayerCheck, 60000);
       }
+      if (!needsAfkReturn) statusMessage = 'Online — AFK Focus ON';
     } else {
       statusMessage = 'Online — AFK';
     }
@@ -286,6 +329,8 @@ function createBot() {
     if (afkCheckInterval) { clearInterval(afkCheckInterval); afkCheckInterval = null; }
     waitingForFindplayer = false;
     if (findplayerTimeout) { clearTimeout(findplayerTimeout); findplayerTimeout = null; }
+    // Keep needsAfkReturn — if bot was displaced, it must /afk 16 after reconnect
+    // But reset cooldown so /afk 16 can be sent immediately on next spawn
     lastAfk16Time = 0;
 
     const kick = (lastKickReason || '').toLowerCase();
@@ -349,8 +394,7 @@ function createBot() {
     console.log(`[Chat] ${fullText}`);
     cmdLog.push({ time: Date.now(), dir: 'in', text: fullText });
     if (cmdLog.length > 200) cmdLog.splice(0, cmdLog.length - 200);
-    // Also check for /findplayer responses in chat messages
-    handleFindplayerResponse(message);
+    handleServerMessage(message);
   });
 
   bot.on('message', (jsonMsg) => {
@@ -359,8 +403,7 @@ function createBot() {
       console.log(`[Server] ${text}`);
       cmdLog.push({ time: Date.now(), dir: 'in', text });
       if (cmdLog.length > 200) cmdLog.splice(0, cmdLog.length - 200);
-      // Check if this is a /findplayer response for AFK Focus
-      handleFindplayerResponse(text);
+      handleServerMessage(text);
     }
   });
 }
